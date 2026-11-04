@@ -1,0 +1,76 @@
+# 🚀 ШПАРГАЛКА ПО PYGAME
+
+---
+
+## 🪟 1. ОКНО И ИНИЦИАЛИЗАЦИЯ
+
+| Функция | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `pygame.init()` | Запускает модули pygame | `pygame.init()` (всегда первой!) |
+| `pygame.display.set_mode((w, h))` | Создает окно | `screen = pygame.display.set_mode((1000, 600))` |
+| `pygame.display.set_caption("...")` | Заголовок окна | `pygame.display.set_caption("Маятник")` |
+| `pygame.quit()` | Закрывает pygame | `pygame.quit()` (всегда последней) |
+
+---
+
+## ⏱️ 2. ВРЕМЯ И FPS
+
+| Функция | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `pygame.time.Clock()` | Создает таймер | `clock = pygame.time.Clock()` (до цикла) |
+| `clock.tick(60)` | Ограничивает FPS | `clock.tick(60)` (в самом конце цикла) |
+
+---
+
+## 🎮 3. СОБЫТИЯ И МЫШЬ
+
+| Функция / Константа | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `pygame.event.get()` | Список событий кадра | `for event in pygame.event.get():` |
+| `pygame.QUIT` | Нажатие на крестик | `if event.type == pygame.QUIT: running = False` |
+| `pygame.KEYDOWN` | Нажатие любой клавиши | `if event.type == pygame.KEYDOWN:` |
+| `pygame.K_ESCAPE` | Клавиша ESC | `if event.key == pygame.K_ESCAPE: running = False` |
+| `pygame.K_SPACE` | Клавиша ПРОБЕЛ | `if event.key == pygame.K_SPACE: paused = !paused` |
+| `pygame.MOUSEBUTTONDOWN` | Клик мышкой | `if event.type == pygame.MOUSEBUTTONDOWN:` |
+| `pygame.mouse.get_pos()` | Координаты мыши | `mx, my = pygame.mouse.get_pos()` |
+
+---
+
+## 🎨 4. РИСОВАНИЕ (Ось Y направлена ВНИЗ!)
+
+| Функция | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `surface.fill((R, G, B))` | Залить фон цветом | `screen.fill((25, 25, 35))` |
+| `pygame.draw.line(...)` | Рисует линию | `pygame.draw.line(screen, color, start, end, width)` |
+| `pygame.draw.circle(...)` | Рисует круг | `pygame.draw.circle(screen, color, center, radius)` |
+| `pygame.draw.rect(...)` | Рисует прямоугольник | `pygame.draw.rect(screen, color, (x, y, w, h), width=0)` |
+| `pygame.draw.lines(...)` | Рисует график / ломаную | `pygame.draw.lines(screen, color, closed, points, width)` |
+
+---
+
+## ✏️ 5. РАБОТА С ТЕКСТОМ
+
+| Функция | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `pygame.font.SysFont(name, size)`| Создает шрифт | `font = pygame.font.SysFont("Arial", 24)` (до цикла) |
+| `font.render(text, anti, color)` | Текст в картинку | `text_surf = font.render("Score: 0", True, (255,255,255))` |
+| `surface.blit(source, (x, y))` | Выводит текст/картинку | `screen.blit(text_surf, (20, 20))` |
+
+---
+
+## 📐 6. КОЛЛИЗИИ И ОБРЕЗКА (Для графиков)
+
+| Функция | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `pygame.Rect(x, y, w, h)` | Создает зону-объект | `rect = pygame.Rect(100, 100, 200, 50)` |
+| `rect.collidepoint(x, y)` | Проверка клика в зону | `if rect.collidepoint(mx, my):` |
+| `surface.set_clip(rect)` | Обрезка отрисовки | `screen.set_clip(rect)` (все вне rect невидимо) |
+| `surface.set_clip(None)` | Сброс обрезки | `screen.set_clip(None)` (обязательно после графика!) |
+
+---
+
+## 🔄 7. ОБНОВЛЕНИЕ ЭКРАНА
+
+| Функция | Что делает | Пример использования |
+| :--- | :--- | :--- |
+| `pygame.display.flip()` | Показывает кадр на экран| `pygame.display.flip()` (в конце цикла) |
