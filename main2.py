@@ -6,280 +6,380 @@ import matplotlib.pyplot as plt  # библиотека для построен�
 
 pygame.init()     # ЗАПУСК PYGAME
 
-# === ДАНО ===
-m = 0.1     # масса груза, кг.
-L = 0.3     # длина палки, м.
-g = 9.81    # ускорение свободного падения
-b = 0.05    # трение
-rho_lin = 0.104976          # линейная плотность палки, кг/м
-m_rod = rho_lin * L         # масса палки
-J = m * L**2 + m_rod * L**2 / 3   # момент инерции
-k1 = 5.0     # П-регулятор
-k2 = 0.6     # Д-регулятор
-k3 = 0.0     # И-регулятор
-max_tau = 1.5 # максимальный момент мотора (паспорт, не трогать)
-int_err = 0.0     # накопление ошибки
+# === ДАНО (ПАРАМЕТРЫ ИЗ ДОКУМЕНТАЦИИ) ===
+m = 0.05    # масса груза (4 подшипника), кг
+L = 0.4     # длина плеча (штанги), м
+g = 9.81    # ускорение свободного падения, м/с^2
+b = 0.003   # коэффициент вязкого трения в оси, Н*м*с/рад
+rho_lin = 0.104976          # распределённая линейная плотность штанги, кг/м
+m_rod = rho_lin * L         # масса штанги (0.042 кг при L=0.4 м)
+J = m * L**2 + (1.0 / 3.0) * m_rod * L**2   # суммарный момент инерции J_Sigma
+
+# === МАТЕМАТИЧЕСКАЯ МОДЕЛЬ МОТОРА JGB37-520 + ARDUINO ===
+U_max = 12.0        # максимальное напряжение питания драйвера мотора, В
+U_ard = 4.8         # рабочее управляющее напряжение с Arduino (4-5 Вольт)
+R_a = 5.0           # активное сопротивление обмотки якоря, Ом
+N_gear = 17.0       # передаточное число редуктора N (1:17)
+eta_gear = 0.80     # КПД редуктора eta
+K_e = 0.021         # коэффициент противо-ЭДС моторчика до редуктора, В/(рад/с)
+K_t = 0.021         # коэффициент крутящего момента моторчика до редуктора, Н*м/А
+
+# === ПАРАМЕТРЫ КОНТРОЛЛЕРА (П-РЕГУЛЯТОР ПО ЭНЕРГИИ + П/ПД ПО УГЛУ В +/- 15 ГРАД) ===
+k_swing = 5.0                   # нормированный коэффициент П-регулятора по энергии (4-5 В)
+switch_ang = np.radians(15.0)   # переход в регулятор по углу строго при +/- 15 градусах
+k1 = 85.0           # П-регулятор по углу (В / рад)
+k2 = 14.0           # Д-регулятор по угловой скорости (В / (рад/с))
+k3 = 0.0            # И-регулятор
+int_err = 0.0       # накопление интегральной ошибки
+
+# === НАЧАЛЬНОЕ СОСТОЯНИЕ И ЭКРАН ===
 cx = 500     # центр по x
 cy = 300     # центр по y
-scale = 400     # масштаб
-theta = np.radians(90)     # начальное положение
-omega = 0.0     # угловая скорость
-acc = 0.0     # угловое ускорение (запас, чтобы текст не падал на паузе)
-tau = 0.0     # момент мотора (запас для текста на паузе)
-dt = 1/60        # 60 фпс
-dt_phys = dt / 10  # чтобы ПИД не поехал, обновление ставим чаще, иначе начинается тряска
-print(f"{J:.4f}")     # вывод момента инерции для проверки
-height = 600     # высота
-width = 1000     # ширина
-screen = pygame.display.set_mode((width, height))     # параметры экрана
-pygame.display.set_caption("InvertedPendFTL")    # название окна
-font = pygame.font.SysFont("Orbitron", 22)    # основной шрифт текста
-font2 = pygame.font.SysFont("Orbitron", 14)   # мелкий шрифт для графиков
-clock = pygame.time.Clock()     # создание часов
-running = True     # симуляция запущена заранее
-paused = False     # пауза
+scale = 350  # масштаб отрисовки
+theta = np.radians(180.0)   # старт строго из нижнего положения покоя (180 градусов)
+omega = 0.0     # начальная угловая скорость, рад/с
+acc = 0.0       # угловое ускорение, рад/с^2
+tau = 0.0       # крутящий момент мотора на выходном валу, Н*м
+U = 0.0         # управляющее напряжение на моторе, В
+I_curr = 0.0    # ток в обмотке якоря, А
+E_curr_val = 0.0 # текущая энергия для отображения
+E_star_val = 0.0 # целевая энергия E* для отображения
+mode = "SWING-UP"   # режим контроллера
+
+dt = 1/60          # 60 фпс
+dt_phys = dt / 10  # шаг численного интегрирования физики
+print(f"J_Sigma = {J:.5f} kg*m^2")
+
+height = 600     # высота окна
+width = 1000     # ширина окна
+screen = pygame.display.set_mode((width, height))
+pygame.display.set_caption("InvertedPendFTL - JGB37-520 + Arduino (4-5V Swing-Up)")
+font = pygame.font.SysFont("Orbitron", 19)    # основной шрифт интерфейса
+font2 = pygame.font.SysFont("Orbitron", 14)   # шрифт графиков
+clock = pygame.time.Clock()
+running = True
+paused = False
 
 # создание папки plots рядом со скриптом для сохранения графиков
 folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots")
 os.makedirs(folder, exist_ok=True)
 
-# === СЛАЙДЕРЫ (новое, имена короткие) ===
-trk_L = pygame.Rect(20, 140, 200, 8)    # дорожка, по которой ездит ручка длины
-hnd_L = pygame.Rect(20, 132, 12, 24)    # ручка, которую тащим мышью (длина)
-trk_m = pygame.Rect(20, 190, 200, 8)    # дорожка ручки массы
-hnd_m = pygame.Rect(20, 182, 12, 24)    # ручка массы
-trk_b = pygame.Rect(20, 240, 200, 8)    # дорожка ручки трения
-hnd_b = pygame.Rect(20, 232, 12, 24)    # ручка трения
-btn_r = pygame.Rect(20, 290, 120, 40)   # кнопка перезапуска симуляции
+# === СЛАЙДЕРЫ ===
+trk_L = pygame.Rect(20, 190, 200, 8)    # дорожка длины L
+hnd_L = pygame.Rect(20, 182, 12, 24)    # ручка длины L
+trk_m = pygame.Rect(20, 240, 200, 8)    # дорожка массы m
+hnd_m = pygame.Rect(20, 232, 12, 24)    # ручка массы m
+trk_b = pygame.Rect(20, 290, 200, 8)    # дорожка трения b
+hnd_b = pygame.Rect(20, 282, 12, 24)    # ручка трения b
+btn_r = pygame.Rect(20, 340, 120, 40)   # кнопка перезапуска RESTART
 drag = None     # какую ручку сейчас тащим: None/L/m/b
 
 def getval(trk, hnd, vmin, vmax):
-    """позиция ручки -> значение: доля пути по дорожке на диапазон"""
+    """позиция ручки -> значение параметра"""
     return vmin + (hnd.x - trk.x) / (trk.w - hnd.w) * (vmax - vmin)
 
 def setpos(trk, hnd, vmin, vmax, val):
-    """значение -> позиция ручки: ставим ручку на нужную долю дорожки"""
+    """значение параметра -> позиция ручки"""
     hnd.x = trk.x + int((val - vmin) / (vmax - vmin) * (trk.w - hnd.w))
 
-setpos(trk_L, hnd_L, 0.1, 0.6, L)       # ручки на текущие значения
+setpos(trk_L, hnd_L, 0.1, 0.6, L)
 setpos(trk_m, hnd_m, 0.02, 0.2, m)
-setpos(trk_b, hnd_b, 0.0, 0.2, b)
+setpos(trk_b, hnd_b, 0.0, 0.05, b)
+
+# === ФУНКЦИЯ МОДЕЛИ МОТОРА JGB37-520 (Формулы 1-2 из описания мотора) ===
+def motor_dynamics(U_in, omega_out):
+    """
+    Вычисляет крутящий момент на выходе редуктора M_out и ток I по поданному напряжению U_in:
+    1) omega_m = omega_out * N
+    2) E = K_e * omega_m (противо-ЭДС)
+    3) U = I * R + E  =>  I = (U - E) / R
+    4) M = K_t * I
+    5) M_out = M * N * eta
+    """
+    omega_m = omega_out * N_gear            # скорость вращения вала самого моторчика
+    E_emf = K_e * omega_m                   # противо-ЭДС
+    I = (U_in - E_emf) / R_a                # ток якоря
+    M_rotor = K_t * I                       # электромагнитный момент ротора
+    M_out = M_rotor * N_gear * eta_gear     # момент на выходном валу после редуктора
+    return M_out, I
 
 # === ЛОГИ ===
-t_hist = []         # список истории времени
-theta_hist = []     # список истории угла
-omega_hist = []     # список истории угловой скорости
-acc_hist = []       # список истории углового ускорения
-tau_hist = []       # список истории момента силы
-t_curr = 0.0        # счётчик текущего времени
+t_hist = []         # история времени
+theta_hist = []     # история угла
+omega_hist = []     # история угловой скорости
+acc_hist = []       # история углового ускорения
+u_hist = []         # история напряжения U
+t_curr = 0.0        # текущее время
 
 # === СОХРАНЕНИЕ ГРАФИКОВ ===
 def save_plots():
-    if len(t_hist) < 2:     # проверка наличия достаточного количества точек
+    if len(t_hist) < 2:
         return
-    plt.figure(figsize=(10, 12))    # задание размера полотна для графиков
-    plt.subplot(4, 1, 1)            # первый подграфик (угол)
+    plt.figure(figsize=(10, 12))
+    plt.subplot(4, 1, 1)
     plt.plot(t_hist, np.degrees(theta_hist), label="theta, deg", color='blue')
     plt.axhline(0, color='black', linestyle='--', alpha=0.5)
     plt.grid(alpha=0.3)
     plt.legend()
-    plt.subplot(4, 1, 2)            # второй подграфик (угловая скорость)
+    plt.subplot(4, 1, 2)
     plt.plot(t_hist, omega_hist, label="omega, rad/s", color='red')
     plt.axhline(0, color='black', linestyle='--', alpha=0.5)
     plt.grid(alpha=0.3)
     plt.legend()
-    plt.subplot(4, 1, 3)            # третий подграфик (угловое ускорение)
+    plt.subplot(4, 1, 3)
     plt.plot(t_hist, acc_hist, label="acc, rad/s^2", color='green')
     plt.axhline(0, color='black', linestyle='--', alpha=0.5)
     plt.grid(alpha=0.3)
     plt.legend()
-    plt.subplot(4, 1, 4)            # четвёртый подграфик (момент силы)
-    plt.plot(t_hist, tau_hist, label="tau, N*m", color='purple')
+    plt.subplot(4, 1, 4)
+    plt.plot(t_hist, u_hist, label="U, Volts", color='purple')
     plt.axhline(0, color='black', linestyle='--', alpha=0.5)
     plt.grid(alpha=0.3)
     plt.legend()
-    plt.xlabel("time, s")           # подпись горизонтальной оси времени
-    plt.tight_layout()              # выравнивание отступов между графиками
-    plt.savefig(os.path.join(folder, "latest_plot.png"))    # сохранение картинки в файл
-    plt.close()                     # закрытие фигуры
+    plt.xlabel("time, s")
+    plt.tight_layout()
+    plt.savefig(os.path.join(folder, "latest_plot.png"))
+    plt.close()
 
 # === ОСНОВНОЙ ЦИКЛ ===
 while running:
-    for event in pygame.event.get():        # перебор всех событий окна
-        if event.type == pygame.QUIT:       # при нажатии крестика
-            running = False                 # закрываем симуляцию
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:       # аналогично с ESC
-            running = False                                                     # и закрыванием
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:        # аналогично с SPACE
-            paused = not paused                                                 # и остановкой
-        if event.type == pygame.MOUSEBUTTONDOWN:                # нажали кнопку мыши
-            if hnd_L.collidepoint(event.pos):                   # попали в ручку длины
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            running = False
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+            paused = not paused
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if hnd_L.collidepoint(event.pos):
                 drag = "L"
-            elif hnd_m.collidepoint(event.pos):                 # попали в ручку массы
+            elif hnd_m.collidepoint(event.pos):
                 drag = "m"
-            elif hnd_b.collidepoint(event.pos):                 # попали в ручку трения
+            elif hnd_b.collidepoint(event.pos):
                 drag = "b"
-            elif btn_r.collidepoint(event.pos):                 # попали в кнопку restart
-                theta = np.radians(90)      # возвращаем начальное положение
-                omega = 0.0                 # гасим скорость
-                int_err = 0.0               # чистим память регулятора
-                t_hist.clear()              # чистим логи, иначе график поедет со скачком
+            elif btn_r.collidepoint(event.pos):
+                theta = np.radians(180.0)   # сброс в нижнюю точку (180 град)
+                omega = 0.0
+                int_err = 0.0
+                t_hist.clear()
                 theta_hist.clear()
                 omega_hist.clear()
                 acc_hist.clear()
-                tau_hist.clear()
-                t_curr = 0.0                # время с нуля
-        if event.type == pygame.MOUSEMOTION and drag is not None:   # тащим ручку
+                u_hist.clear()
+                t_curr = 0.0
+        if event.type == pygame.MOUSEMOTION and drag is not None:
             if drag == "L":
-                hnd_L.x = min(max(event.pos[0] - 6, trk_L.x), trk_L.x + trk_L.w - hnd_L.w)   # не выпускаем за дорожку
-                L = round(getval(trk_L, hnd_L, 0.1, 0.6) / 0.05) * 0.05   # округляем до шага 0.05
-                setpos(trk_L, hnd_L, 0.1, 0.6, L)   # ручка встаёт ровно на шаг
+                hnd_L.x = min(max(event.pos[0] - 6, trk_L.x), trk_L.x + trk_L.w - hnd_L.w)
+                L = round(getval(trk_L, hnd_L, 0.1, 0.6) / 0.05) * 0.05
+                setpos(trk_L, hnd_L, 0.1, 0.6, L)
             if drag == "m":
                 hnd_m.x = min(max(event.pos[0] - 6, trk_m.x), trk_m.x + trk_m.w - hnd_m.w)
-                m = round(getval(trk_m, hnd_m, 0.02, 0.2) / 0.01) * 0.01   # шаг 0.01
+                m = round(getval(trk_m, hnd_m, 0.02, 0.2) / 0.01) * 0.01
                 setpos(trk_m, hnd_m, 0.02, 0.2, m)
             if drag == "b":
                 hnd_b.x = min(max(event.pos[0] - 6, trk_b.x), trk_b.x + trk_b.w - hnd_b.w)
-                b = round(getval(trk_b, hnd_b, 0.0, 0.2) / 0.01) * 0.01   # шаг 0.01
-                setpos(trk_b, hnd_b, 0.0, 0.2, b)
-        if event.type == pygame.MOUSEBUTTONUP:      # отпустили мышь
+                b = round(getval(trk_b, hnd_b, 0.0, 0.05) / 0.002) * 0.002
+                setpos(trk_b, hnd_b, 0.0, 0.05, b)
+        if event.type == pygame.MOUSEBUTTONUP:
             drag = None
-    if not paused:         # функция симуляции
-        for j in range(10):     # 10 раз в цикл
-            m_rod = rho_lin * L                     # пересчёт массы палки
-            J = m * L**2 + m_rod * L**2 / 3         # заново считаем каждый раз, т.к. параметры могут меняться
-            # --- ИНТЕГРИРОВАНИЕ МЕТОДОМ LEAPFROG ---
-            # 1. Полушаг координаты (дрейф): сдвигаем угол на половину шага dt_phys
+
+    if not paused:
+        for j in range(10):     # 10 подшагов численного интегрирования за кадр
+            m_rod = rho_lin * L                                 # масса штанги m_p(L) = 0.104976 * L
+            J = m * L**2 + (1.0 / 3.0) * m_rod * L**2           # момент инерции J_Sigma (Формула 4)
+            M_grav_max = (m * L + m_rod * (L / 2.0)) * g        # максимальный момент тяжести (Формула 2)
+
+            # --- ЧИСЛЕННОЕ ИНТЕГРИРОВАНИЕ МЕТОДОМ LEAPFROG ---
+            # 1. Полушаг координаты (дрейф)
             theta_half = theta + 0.5 * omega * dt_phys
-            # 2. Вычисление управления и ускорения в промежуточной точке полушага
-            e = theta_half      # целевой угол (ошибка в полушаге)
-            int_err = np.clip(int_err + e * dt_phys, -1, 1)   # анти-виндап
-            tau = np.clip(-k1 * e - k2 * omega - k3 * int_err, -max_tau, max_tau)     # лимиты
-            if abs(theta_half) < 0.026:             # реальная мёртвая зона датчика/мотора (~1.5 градуса)
-                tau = 0.0                           # внутри мёртвой зоны привод не даёт момент
-            acc = (m * g * L * np.sin(theta_half) - b * omega + tau) / J     # ускорение в середине шага
-            # 3. Полный шаг скорости (толчок): обновляем угловую скорость через ускорение в полушаге
-            omega = omega + acc * dt_phys           # угловая скорость на конце шага
-            # 4. Второй полушаг координаты (дрейф): доводим угол до конца шага с уже новой скоростью
-            theta = theta_half + 0.5 * omega * dt_phys         # угол на конце шага
+            # Приводим угол к интервалу [-pi, pi], где 0 — верхнее равновесие, +/-pi — нижнее
+            theta_norm = (theta_half + np.pi) % (2.0 * np.pi) - np.pi
+
+            # Расчёт полной механической энергии по Формулам (1), (3), (5):
+            E_kin = 0.5 * J * (omega ** 2)
+            E_pot_inv = M_grav_max * (1.0 - np.cos(theta_norm)) # П(theta) из Формулы (1)
+            E_star_val = 2.0 * M_grav_max                       # E* = 2 * M_тяж,макс из Формулы (3)
+            
+            # Текущий уровень энергии на траектории раскачки (от 0 внизу до E* вверху)
+            E_curr_val = E_kin + (E_star_val - E_pot_inv)
+
+            # Напряжение, необходимое мотору просто для преодоления собственной противо-ЭДС и трения оси b:
+            # Без этой добавки при малом L=0.1м (где скорость высокая) противо-ЭДС (7 В) больше 4.5 В, и мотор тормозит!
+            E_emf_comp = K_e * (omega * N_gear)
+            U_fric_comp = (b * omega) / (K_t * N_gear * eta_gear) * R_a
+
+            # 2. Переключение режимов: если угол в пределах +/- 15 градусов от 0 -> регулятор по углу
+            if abs(theta_norm) <= switch_ang:
+                # === СТАБИЛИЗАЦИЯ В ОКРЕСТНОСТИ +/- 15 ГРАДУСОВ ОТ ВЕРХНЕЙ ТОЧКИ ===
+                mode = "ANGLE (<=15 deg)"
+                deadzone = 0.012    # зона нечувствительности энкодера (~0.7 град)
+                if abs(theta_norm) < deadzone:
+                    e = 0.0
+                    U = 0.0
+                else:
+                    e = theta_norm - np.sign(theta_norm) * deadzone
+                    int_err = np.clip(int_err + e * dt_phys, -0.5, 0.5)
+                    # Формула (10): П/ПД-регулятор по углу
+                    U = -k1 * e - k2 * omega - k3 * int_err
+            else:
+                # === РАСКАЧКА ПО ЭНЕРГИИ (SWING-UP CONTROL, когда угол вне +/- 15 градусов) ===
+                mode = "SWING-UP (ENERGY)"
+                int_err = 0.0
+                # Если маятник стоит неподвижно в нижней точке на старте, даём стартовые 4.8 В с Arduino
+                if abs(omega) < 1e-3 and abs(abs(theta_norm) - np.pi) < 0.05:
+                    U = U_ard
+                else:
+                    # Нормированная ошибка энергии (E - E*) / E*, чтобы работало одинаково при любых m и L!
+                    E_err_norm = (E_curr_val - E_star_val) / max(E_star_val, 1e-5)
+                    direction = np.sign(omega) if abs(omega) > 1e-4 else -np.sign(theta_norm)
+
+                    # Формула (7): U_swing = -k * (E - E*) * sign(omega)
+                    # Пока энергия меньше целевой E*, подаём 4-5 Вольт управляющего сигнала Arduino
+                    if E_err_norm < 0:
+                        U_drive = max(-k_swing * E_err_norm, U_ard) * direction
+                        # Добавляем компенсацию противо-ЭДС и трения, чтобы при L=0.1м и m=0.02кг мотор не тормозил
+                        U = U_drive + E_emf_comp + U_fric_comp
+                    else:
+                        # Если энергии перекачали (E > E*), плавно притормаживаем
+                        U = -k_swing * E_err_norm * direction
+
+            # Ограничение напряжения питания драйвера мотора (+/- 12 В)
+            U = float(np.clip(U, -U_max, U_max))
+
+            # 3. Расчёт крутящего момента tau через электромеханическую модель мотора JGB37-520
+            tau, I_curr = motor_dynamics(U, omega)
+
+            # 4. Уравнение динамики маятника (Формула 1): J * acc = M_grav_max * sin(theta) - b * omega + tau
+            acc = (M_grav_max * np.sin(theta_norm) - b * omega + tau) / J
+
+            # 5. Полный шаг скорости (толчок) и завершающий полушаг координаты (дрейф)
+            omega = omega + acc * dt_phys
+            theta = theta_half + 0.5 * omega * dt_phys
+            theta = (theta + np.pi) % (2.0 * np.pi) - np.pi
+
         # === ЗАПОЛНЕНИЕ ИСТОРИИ ===
-        t_hist.append(t_curr)       # сохранение текущего времени
-        theta_hist.append(theta)    # сохранение угла
-        omega_hist.append(omega)    # сохранение угловой скорости
-        acc_hist.append(acc)        # сохранение углового ускорения
-        tau_hist.append(tau)        # сохранение управляющего момента
-        t_curr += dt                # шаг времени кадра
-    # координаты груза и заполнение экрана
-    screen.fill((255, 255, 255))                        # очистка экрана белым цветом
-    x_end = cx - round(scale * L * np.sin(theta))       # расчёт X координаты груза
-    y_end = cy - round(scale * L * np.cos(theta))       # расчёт Y координаты груза
-    # рисуем маятник
-    pygame.draw.circle(screen, (40, 50, 60), (cx, cy), 10)              # отрисовка оси крепления
-    pygame.draw.line(screen, (60, 70, 80), (cx, cy), (x_end, y_end), 5) # отрисовка стержня
-    pygame.draw.circle(screen, (80, 90, 100), (x_end, y_end), 15)       # отрисовка груза на конце
-    # проверка существования точек и данные для графиков с рамкой
+        t_hist.append(t_curr)
+        theta_hist.append(theta)
+        omega_hist.append(omega)
+        acc_hist.append(acc)
+        u_hist.append(U)
+        t_curr += dt
+
+    # Очистка экрана и расчёт координат конца штанги
+    screen.fill((255, 255, 255))
+    x_end = cx - round(scale * L * np.sin(theta))
+    y_end = cy - round(scale * L * np.cos(theta))
+
+    # Отрисовка сектора захвата +/- 15 градусов
+    x_left15 = cx - round(scale * L * np.sin(switch_ang))
+    y_left15 = cy - round(scale * L * np.cos(switch_ang))
+    x_right15 = cx - round(scale * L * np.sin(-switch_ang))
+    y_right15 = cy - round(scale * L * np.cos(-switch_ang))
+    pygame.draw.line(screen, (210, 230, 210), (cx, cy), (x_left15, y_left15), 2)
+    pygame.draw.line(screen, (210, 230, 210), (cx, cy), (x_right15, y_right15), 2)
+
+    # Отрисовка маятника
+    pygame.draw.circle(screen, (40, 50, 60), (cx, cy), 10)
+    pygame.draw.line(screen, (60, 70, 80), (cx, cy), (x_end, y_end), 5)
+    pygame.draw.circle(screen, (80, 90, 100), (x_end, y_end), 15)
+
+    # Отрисовка графиков
     if len(t_hist) > 1:
-        graph_rect = pygame.Rect(600, 50, 350, 500)             # прямоугольник области графиков
-        pygame.draw.rect(screen, (235, 235, 235), graph_rect)   # заливка фона графиков
-        pygame.draw.rect(screen, (40, 50, 60), graph_rect, 2)   # отрисовка контура рамки
-        window = max(t_hist[-1] - t_hist[0], 1.0)               # ширина временного окна
-        # чтобы не было ошибок при 0 и определение максимумов
-        max_t = 1.0     # максимальный угол
-        max_o = 1.0     # максимальная угловая скорость
-        max_a = 1.0     # максимальное угловое ускорение
-        max_tau_h = 0.1   # максимум момента ИЗ ИСТОРИИ (отдельно от паспорта max_tau!)
-        for i in range(len(t_hist)):                            # поиск максимумов по истории
+        graph_rect = pygame.Rect(600, 50, 350, 500)
+        pygame.draw.rect(screen, (235, 235, 235), graph_rect)
+        pygame.draw.rect(screen, (40, 50, 60), graph_rect, 2)
+        window = max(t_hist[-1] - t_hist[0], 1.0)
+
+        max_t, max_o, max_a, max_u_h = 1.0, 1.0, 1.0, 1.0
+        for i in range(len(t_hist)):
             if abs(np.degrees(theta_hist[i])) > max_t:
-                max_t = abs(np.degrees(theta_hist[i]))          # обновление максимума угла
+                max_t = abs(np.degrees(theta_hist[i]))
             if abs(omega_hist[i]) > max_o:
-                max_o = abs(omega_hist[i])                      # обновление максимума скорости
+                max_o = abs(omega_hist[i])
             if abs(acc_hist[i]) > max_a:
-                max_a = abs(acc_hist[i])                        # обновление максимума ускорения
-            if abs(tau_hist[i]) > max_tau_h:
-                max_tau_h = abs(tau_hist[i])                    # обновление максимума момента
-        # масштаб(шкала)
-        scale_t = 720   # стандартный масштаб угла
-        for s in [2, 5, 10, 20, 45, 90, 180, 360, 720]:         # подбор подходящей шкалы угла
+                max_a = abs(acc_hist[i])
+            if abs(u_hist[i]) > max_u_h:
+                max_u_h = abs(u_hist[i])
+
+        scale_t = 180
+        for s in [5, 15, 45, 90, 180, 360]:
             if s >= max_t:
                 scale_t = s
                 break
-        scale_o = 50    # стандартный масштаб угловой скорости
-        for s in [1, 2, 5, 10, 20, 50]:                         # подбор шкалы скорости
+        scale_o = 50
+        for s in [2, 5, 10, 15, 20, 50]:
             if s >= max_o:
                 scale_o = s
                 break
-        scale_a = 500   # стандартный масштаб ускорения
-        for s in [5, 10, 20, 50, 100, 200, 500]:                # подбор шкалы ускорения
+        scale_a = 500
+        for s in [10, 20, 50, 100, 200, 500]:
             if s >= max_a:
                 scale_a = s
                 break
-        scale_tau = 3   # стандартный масштаб момента силы
-        for s in [0.5, 1, 1.5, 2, 3]:                           # подбор шкалы момента
-            if s >= max_tau_h:
-                scale_tau = s
-                break
-        pygame.draw.line(screen, (120, 120, 120), (600, 112), (950, 112), 1)   # нули (ось угла)
-        pygame.draw.line(screen, (120, 120, 120), (600, 237), (950, 237), 1)   # нули (ось скорости)
-        pygame.draw.line(screen, (120, 120, 120), (600, 362), (950, 362), 1)   # нули (ось ускорения)
-        pygame.draw.line(screen, (120, 120, 120), (600, 487), (950, 487), 1)   # нули (ось момента)
-        pts_t = []      # точки полилинии угла
-        pts_o = []      # точки полилинии скорости
-        pts_a = []      # точки полилинии ускорения
-        pts_tau = []    # точки полилинии момента
-        for i in range(len(t_hist)):    # расчёт пиксельных координат для каждой точки истории
-            x_graph = 600 + int((t_hist[i] - t_hist[0]) / window * 350)     # координата X по времени
-            y_t = 112 - int(np.degrees(theta_hist[i]) / scale_t * 50)       # координата Y угла
-            y_o = 237 - int(omega_hist[i] / scale_o * 50)                   # координата Y скорости
-            y_a = 362 - int(acc_hist[i] / scale_a * 50)                     # координата Y ускорения
-            y_tau = 487 - int(tau_hist[i] / scale_tau * 50)                 # координата Y момента
-            pts_t.append((x_graph, y_t))        # добавление точки угла
-            pts_o.append((x_graph, y_o))        # добавление точки скорости
-            pts_a.append((x_graph, y_a))        # добавление точки ускорения
-            pts_tau.append((x_graph, y_tau))    # добавление точки момента
-        screen.set_clip(graph_rect)             # обрезка рисования по границам окна графиков
-        if len(pts_t) > 1:                      # если точек достаточно для линии
-            pygame.draw.lines(screen, (30, 90, 200), False, pts_t, 2)       # кривая угла
-            pygame.draw.lines(screen, (200, 60, 60), False, pts_o, 2)       # кривая скорости
-            pygame.draw.lines(screen, (60, 160, 60), False, pts_a, 2)       # кривая ускорения
-            pygame.draw.lines(screen, (160, 60, 160), False, pts_tau, 2)    # кривая момента
-        screen.set_clip(None)                   # снятие ограничения области рисования
-        lab1 = font2.render("theta, deg +/-" + str(scale_t), True, (30, 90, 200))   # текст шкалы угла
-        lab2 = font2.render("omega, rad/s +/-" + str(scale_o), True, (200, 60, 60)) # текст шкалы скорости
-        lab3 = font2.render("acc, rad/s^2 +/-" + str(scale_a), True, (60, 160, 60)) # текст шкалы ускорения
-        lab4 = font2.render("tau, N*m +/-" + str(scale_tau), True, (160, 60, 160))  # текст шкалы момента
-        lab_t = font2.render("t, s: 0..." + str(round(window, 1)), True, (0, 0, 0)) # текст шкалы времени
-        screen.blit(lab1, (605, 62))            # вывод подписи угла
-        screen.blit(lab2, (605, 187))           # вывод подписи скорости
-        screen.blit(lab3, (605, 312))           # вывод подписи ускорения
-        screen.blit(lab4, (605, 437))           # вывод подписи момента
-        screen.blit(lab_t, (605, 555))          # вывод подписи времени
-    theta_str = "Theta: " + str(round(np.degrees(theta), 2)) + " deg"   # строка текущего угла
-    tau_str = "Tau: " + str(round(tau, 3)) + " N*m"                     # строка текущего момента
-    text1 = font.render(theta_str, True, (0, 0, 0))                     # рендер текста угла
-    text2 = font.render(tau_str, True, (0, 0, 0))                       # рендер текста момента
-    screen.blit(text1, (20, 20))                                        # отображение угла на экране
-    screen.blit(text2, (20, 50))                                        # отображение момента на экране
-    if paused:                                                          # проверка состояния паузы
-        text3 = font.render("PAUSED", True, (200, 60, 60))              # рендер надписи паузы
-        screen.blit(text3, (20, 80))                                    # отображение надписи паузы
-    # отрисовка слайдеров (новое)
-    pygame.draw.rect(screen, (180, 180, 180), trk_L)   # серая дорожка длины
-    pygame.draw.rect(screen, (40, 50, 60), hnd_L)      # тёмная ручка длины
-    pygame.draw.rect(screen, (180, 180, 180), trk_m)   # серая дорожка массы
-    pygame.draw.rect(screen, (40, 50, 60), hnd_m)      # тёмная ручка массы
-    pygame.draw.rect(screen, (180, 180, 180), trk_b)   # серая дорожка трения
-    pygame.draw.rect(screen, (40, 50, 60), hnd_b)      # тёмная ручка трения
-    pygame.draw.rect(screen, (60, 160, 60), btn_r)     # зелёная кнопка перезапуска
-    lb_L = font2.render("L: " + str(round(L, 2)) + " m", True, (0, 0, 0))      # подпись длины
-    lb_m = font2.render("m: " + str(round(m, 3)) + " kg", True, (0, 0, 0))     # подпись массы
-    lb_b = font2.render("b: " + str(round(b, 3)), True, (0, 0, 0))             # подпись трения
-    lb_r = font2.render("RESTART", True, (255, 255, 255))                      # надпись на кнопке
-    screen.blit(lb_L, (20, 115))    # вывод подписи длины
-    screen.blit(lb_m, (20, 165))    # вывод подписи массы
-    screen.blit(lb_b, (20, 215))    # вывод подписи трения
-    screen.blit(lb_r, (35, 300))    # вывод надписи кнопки
-    pygame.display.flip()   # обновление кадра на экране
-    clock.tick(60)          # ограничение частоты кадров до 60 FPS
+        scale_u = 12
 
-save_plots()    # сохранение графиков после закрытия окна
-pygame.quit()   # выгрузка модулей Pygame
+        pygame.draw.line(screen, (120, 120, 120), (600, 112), (950, 112), 1)
+        pygame.draw.line(screen, (120, 120, 120), (600, 237), (950, 237), 1)
+        pygame.draw.line(screen, (120, 120, 120), (600, 362), (950, 362), 1)
+        pygame.draw.line(screen, (120, 120, 120), (600, 487), (950, 487), 1)
+
+        pts_t, pts_o, pts_a, pts_u = [], [], [], []
+        for i in range(len(t_hist)):
+            x_graph = 600 + int((t_hist[i] - t_hist[0]) / window * 350)
+            y_t = 112 - int(np.degrees(theta_hist[i]) / scale_t * 50)
+            y_o = 237 - int(omega_hist[i] / scale_o * 50)
+            y_a = 362 - int(acc_hist[i] / scale_a * 50)
+            y_u = 487 - int(u_hist[i] / scale_u * 50)
+            pts_t.append((x_graph, y_t))
+            pts_o.append((x_graph, y_o))
+            pts_a.append((x_graph, y_a))
+            pts_u.append((x_graph, y_u))
+
+        screen.set_clip(graph_rect)
+        if len(pts_t) > 1:
+            pygame.draw.lines(screen, (30, 90, 200), False, pts_t, 2)
+            pygame.draw.lines(screen, (200, 60, 60), False, pts_o, 2)
+            pygame.draw.lines(screen, (60, 160, 60), False, pts_a, 2)
+            pygame.draw.lines(screen, (160, 60, 160), False, pts_u, 2)
+        screen.set_clip(None)
+
+        lab1 = font2.render("theta, deg +/-" + str(scale_t), True, (30, 90, 200))
+        lab2 = font2.render("omega, rad/s +/-" + str(scale_o), True, (200, 60, 60))
+        lab3 = font2.render("acc, rad/s^2 +/-" + str(scale_a), True, (60, 160, 60))
+        lab4 = font2.render("U, Volts +/-" + str(scale_u), True, (160, 60, 160))
+        lab_t = font2.render("t, s: 0..." + str(round(window, 1)), True, (0, 0, 0))
+        screen.blit(lab1, (605, 62))
+        screen.blit(lab2, (605, 187))
+        screen.blit(lab3, (605, 312))
+        screen.blit(lab4, (605, 437))
+        screen.blit(lab_t, (605, 555))
+
+    # Телеметрия на экране
+    mode_color = (30, 140, 60) if "ANGLE" in mode else (210, 110, 20)
+    screen.blit(font.render(f"Theta: {np.degrees(theta):.1f} deg", True, (0, 0, 0)), (20, 18))
+    screen.blit(font.render(f"U: {U:.2f} V  (I: {I_curr:.2f} A)", True, (0, 0, 0)), (20, 44))
+    screen.blit(font.render(f"Tau: {tau:.3f} N*m", True, (0, 0, 0)), (20, 70))
+    screen.blit(font.render(f"E: {E_curr_val:.3f} / E*: {E_star_val:.3f} J", True, (0, 0, 0)), (20, 96))
+    screen.blit(font.render(f"Mode: {mode}", True, mode_color), (20, 122))
+
+    if paused:
+        screen.blit(font.render("PAUSED", True, (200, 60, 60)), (20, 148))
+
+    # Отрисовка слайдеров
+    pygame.draw.rect(screen, (180, 180, 180), trk_L)
+    pygame.draw.rect(screen, (40, 50, 60), hnd_L)
+    pygame.draw.rect(screen, (180, 180, 180), trk_m)
+    pygame.draw.rect(screen, (40, 50, 60), hnd_m)
+    pygame.draw.rect(screen, (180, 180, 180), trk_b)
+    pygame.draw.rect(screen, (40, 50, 60), hnd_b)
+    pygame.draw.rect(screen, (60, 160, 60), btn_r)
+    screen.blit(font2.render("L: " + str(round(L, 2)) + " m", True, (0, 0, 0)), (20, 168))
+    screen.blit(font2.render("m: " + str(round(m, 3)) + " kg", True, (0, 0, 0)), (20, 218))
+    screen.blit(font2.render("b: " + str(round(b, 3)), True, (0, 0, 0)), (20, 268))
+    screen.blit(font2.render("RESTART", True, (255, 255, 255)), (35, 352))
+
+    pygame.display.flip()
+    clock.tick(60)
+
+save_plots()
+pygame.quit()
